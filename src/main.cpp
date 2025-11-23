@@ -1,10 +1,25 @@
 #include <Arduino.h>
 #include <ESP32-HUB75-MatrixPanel-I2S-DMA.h>
 #include <Adafruit_GFX.h>
-#include <BluetoothSerial.h>
+#include <string>
+
+
 
 #include <WiFi.h>
 #include <WebServer.h>
+
+// (BLE headers included later inside the ENABLE_BT block after flags are set)
+
+// ===== Feature toggles (default: USB only) =====
+#ifndef ENABLE_WIFI
+#define ENABLE_WIFI 0
+#endif
+#ifndef ENABLE_BT
+#define ENABLE_BT 1
+#endif
+#ifndef ENABLE_HTTP_SERVER
+#define ENABLE_HTTP_SERVER ENABLE_WIFI
+#endif
 
 // ===== Panel setup =====
 #define PANEL_RES_X 64   // width of ONE panel
@@ -14,9 +29,77 @@
 // Display
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 
-// ===== Bluetooth (SPP) =====
-BluetoothSerial SerialBT;
-static String btAccum;
+// ===== Bluetooth (BLE) =====
+#if ENABLE_BT
+#include <NimBLEDevice.h>
+// Nordic UART Service UUIDs
+static const char* NUS_SERVICE_UUID      = "6E400001-B5A3-F393-E0A9-E50E24DCCA9E";
+static const char* NUS_CHAR_UUID_RX      = "6E400002-B5A3-F393-E0A9-E50E24DCCA9E"; // write from central -> ESP32
+static const char* NUS_CHAR_UUID_TX      = "6E400003-B5A3-F393-E0A9-E50E24DCCA9E"; // notify from ESP32 -> central
+
+static NimBLEServer*          gBleServer         = nullptr;
+static NimBLECharacteristic*  gBleTxChar         = nullptr;
+static NimBLEAdvertising*     gBleAdvertising    = nullptr;
+static std::string            bleAccum; // accumulate until newline
+
+class RxCallbacks : public NimBLECharacteristicCallbacks {
+  void onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*connInfo*/) override;
+};
+static RxCallbacks gRxCallbacks;
+
+class ServerCallbacks : public NimBLEServerCallbacks {
+  void onConnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*ci*/) override {
+    if (Serial) Serial.println("[BLE] central connected");
+  }
+  void onDisconnect(NimBLEServer* /*srv*/, NimBLEConnInfo& /*ci*/, int reason) override {
+    if (Serial) { Serial.print("[BLE] central disconnected, reason="); Serial.println(reason); }
+    if (gBleAdvertising) {
+      gBleAdvertising->start(); // resume advertising so scanners can see it again
+      if (Serial) Serial.println("[BLE] advertising restarted");
+    }
+  }
+};
+static ServerCallbacks gServerCallbacks;
+
+static void initBLE() {
+  // Init BLE stack
+  NimBLEDevice::init("MatrixPanel");
+  if (Serial) Serial.println("[BLE] init: name=MatrixPanel");
+  NimBLEDevice::setPower(ESP_PWR_LVL_P7); // max tx power for stability
+  NimBLEDevice::setMTU(185);              // allow larger writes from macOS
+
+  gBleServer = NimBLEDevice::createServer();
+  gBleServer->setCallbacks(&gServerCallbacks);
+
+  NimBLEService* svc = gBleServer->createService(NUS_SERVICE_UUID);
+
+  // TX: notify to central
+  gBleTxChar = svc->createCharacteristic(
+    NUS_CHAR_UUID_TX,
+    NIMBLE_PROPERTY::NOTIFY
+  );
+
+  // RX: write from central
+  NimBLECharacteristic* rx = svc->createCharacteristic(
+    NUS_CHAR_UUID_RX,
+    NIMBLE_PROPERTY::WRITE | NIMBLE_PROPERTY::WRITE_NR
+  );
+  rx->setCallbacks(&gRxCallbacks);
+
+  svc->start();
+
+  // Advertise NUS service so macOS CoreBluetooth tools can find it
+  gBleAdvertising = NimBLEDevice::getAdvertising();
+  gBleAdvertising->addServiceUUID(NUS_SERVICE_UUID);
+  gBleAdvertising->setConnectableMode(BLE_GAP_CONN_MODE_UND);
+  gBleAdvertising->setDiscoverableMode(BLE_GAP_DISC_MODE_GEN);
+  gBleAdvertising->enableScanResponse(true);
+  gBleAdvertising->setName("MatrixPanel");
+  NimBLEDevice::setDeviceName("MatrixPanel");
+  gBleAdvertising->start();
+  if (Serial) Serial.println("[BLE] advertising started (NUS)");
+}
+#endif
 static bool kNewLivePending = false; // trigger to start dissolve->thinking->typewriter on new text
 
 // ===== Wi-Fi (STA) + HTTP server =====
@@ -27,6 +110,22 @@ WebServer server(80);
 // ===== Wrapped text mode (Option A) =====
 static String gLiveText;         // incoming free-form text (no fixed line count)
 static bool   gHasLiveText = false;
+
+#if ENABLE_BT
+// Define the onWrite now that globals above are declared
+void RxCallbacks::onWrite(NimBLECharacteristic* c, NimBLEConnInfo& /*connInfo*/) {
+  std::string v = c->getValue();
+  if (v.empty()) return;
+  // Append incoming bytes and look for a newline to mark a complete message
+  bleAccum.append(v);
+  if (bleAccum.find('\n') != std::string::npos) {
+    gLiveText = String(bleAccum.c_str());
+    gHasLiveText = true;
+    kNewLivePending = true;
+    bleAccum.clear();
+  }
+}
+#endif
 
 // Combined canned sentences (built from existing 6-line sets)
 static String gCannedText[16];   // supports up to 16 canned sets; actual count built in setup
@@ -91,7 +190,8 @@ static const int kNumPhilos = sizeof(kPhilosophies) / sizeof(kPhilosophies[0]);
 static int currentPhilo = 0; // index into kPhilosophies
 
 // Target brightness for normal view
-static const uint8_t kTargetBrightness = 60;
+// Increase for daylight readability (0..255). Was 60.
+static const uint8_t kTargetBrightness = 120;
 
 // ===== Dynamic per-line color palette =====
 static uint16_t gLineColors[6] = {0};
@@ -233,20 +333,11 @@ void handlePost() {
   server.send(200, "text/plain", "ok");
 }
 
-// Read from Bluetooth and capture the first 6 newline-terminated lines
+// BLE RX is handled in RxCallbacks::onWrite; nothing to poll here.
 void processBluetooth() {
-  while (SerialBT.available()) {
-    char c = (char)SerialBT.read();
-    btAccum += c;
-    if (btAccum.length() > 4096) btAccum.remove(0, btAccum.length() - 2048);
-  }
-  // If we received a newline, treat the current buffer as a complete message
-  if (btAccum.indexOf('\n') != -1) {
-    gLiveText = btAccum;
-    gHasLiveText = true;
-    kNewLivePending = true;
-    btAccum = "";
-  }
+#if ENABLE_BT
+  // BLE RX is handled in RxCallbacks::onWrite; nothing to poll here.
+#endif
 }
 
 // Read 6 newline-terminated lines from USB Serial
@@ -335,42 +426,53 @@ void setup() {
   currentPhilo = random(kNumPhilos);
   drawSixLines();
 
-  // Bluetooth SPP
-  SerialBT.begin("MatrixPanel");
+  // Bluetooth BLE (NimBLE UART / NUS)
+  #if ENABLE_BT
+  initBLE();
+  if (Serial) Serial.println("[BLE] setup complete; scanning from a phone or Mac should show 'MatrixPanel'.");
+  #endif
 
   // --- Wi-Fi station bring-up ---
-WiFi.mode(WIFI_STA);
-WiFi.begin(WIFI_SSID, WIFI_PASS);
-unsigned long wifiStart = millis();
-while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000UL) {
-  delay(250);
-}
-if (WiFi.status() == WL_CONNECTED) {
-  Serial.print("ESP32 IP: ");
-  Serial.println(WiFi.localIP());
-  // Show IP on the LED panel for 5 seconds
-  dma_display->fillScreen(0);
-  dma_display->setCursor(0, 0);
-  dma_display->setTextColor(dma_display->color565(255, 255, 255));
-  dma_display->print("IP: ");
-  dma_display->println(WiFi.localIP());
-  delay(5000);
+  #if ENABLE_WIFI
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long wifiStart = millis();
+  while (WiFi.status() != WL_CONNECTED && millis() - wifiStart < 15000UL) {
+    delay(250);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    Serial.print("ESP32 IP: ");
+    Serial.println(WiFi.localIP());
+    // Show IP on the LED panel for 5 seconds
+    dma_display->fillScreen(0);
+    dma_display->setCursor(0, 0);
+    dma_display->setTextColor(dma_display->color565(255, 255, 255));
+    dma_display->print("IP: ");
+    dma_display->println(WiFi.localIP());
+    delay(5000);
 
-  // Restore initial display
-  drawSixLines();
-} else {
-  Serial.println("Wi-Fi not connected (continuing; BT will still work).");
-}
+    // Restore initial display
+    drawSixLines();
+  } else {
+    Serial.println("Wi-Fi not connected (continuing; BT will still work).");
+  }
+  #endif
 
 // --- HTTP endpoint ---
-server.on("/post", HTTP_POST, handlePost);
-server.begin();
+  #if ENABLE_HTTP_SERVER
+  server.on("/post", HTTP_POST, handlePost);
+  server.begin();
+  #endif
 }
 
 void loop() {
+  #if ENABLE_HTTP_SERVER
   server.handleClient();
+  #endif
   processUSB();
+  #if ENABLE_BT
   processBluetooth();
+  #endif
 
   enum ScreenState { STATE_WAIT_60S, STATE_DISSOLVING, STATE_POST_DISSOLVE_PAUSE,
                      STATE_THINING, STATE_TYPEWRITER, STATE_DONE };

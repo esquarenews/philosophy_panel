@@ -48,8 +48,9 @@ SER_HANDLE = None
 PROMPT = """You must obey this FORMAT CONTRACT exactly.
 
 OBJECTIVE
-Write one coherent sentence across AT MOST 28 tokens delivering a message from a Christmas card, or a greeting that you might give someone at Xmas. 
-End naturally when the sentence is complete; do not pad to reach 28 tokens, and do not end mid sentance.
+Write one coherent sentence across AT MOST 28 tokens delivering a line that sounds like it was lifted 
+from the book THE OUTSIDERS by S.E. Hinton
+End naturally when the sentence is complete; do not pad to reach 28 tokens.
 
 HARD RULES
 - Output no more than 6 (SIX) lines.
@@ -372,10 +373,6 @@ class BlePersistent:
         self.ev.call(self._ensure_connected())
 
     def write(self, payload: str):
-        # Allow zero-length payload as a quick "ping" to just ensure the link is up.
-        if not payload:
-            self.ev.call(self._ensure_connected())
-            return
         self.ev.call(self._write(payload))
 
     def close(self):

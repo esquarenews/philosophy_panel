@@ -26,6 +26,56 @@
 #define PANEL_RES_Y 64   // height of ONE panel
 #define PANEL_CHAIN 2    // two 64x64 panels chained horizontally -> 128x64 total
 
+// Allow board-specific HUB75 pin remapping without editing logic below.
+#ifndef HUB75_R1_PIN
+#define HUB75_R1_PIN 25
+#endif
+#ifndef HUB75_G1_PIN
+#define HUB75_G1_PIN 26
+#endif
+#ifndef HUB75_B1_PIN
+#define HUB75_B1_PIN 27
+#endif
+#ifndef HUB75_R2_PIN
+#define HUB75_R2_PIN 14
+#endif
+#ifndef HUB75_G2_PIN
+#define HUB75_G2_PIN 12
+#endif
+#ifndef HUB75_B2_PIN
+#define HUB75_B2_PIN 13
+#endif
+#ifndef HUB75_CLK_PIN
+#define HUB75_CLK_PIN 16
+#endif
+#ifndef HUB75_LAT_PIN
+#define HUB75_LAT_PIN 4
+#endif
+#ifndef HUB75_OE_PIN
+#define HUB75_OE_PIN 15
+#endif
+#ifndef HUB75_A_PIN
+#define HUB75_A_PIN 23
+#endif
+#ifndef HUB75_B_PIN
+#define HUB75_B_PIN 19
+#endif
+#ifndef HUB75_C_PIN
+#define HUB75_C_PIN 5
+#endif
+#ifndef HUB75_D_PIN
+#define HUB75_D_PIN 17
+#endif
+#ifndef HUB75_E_PIN
+#define HUB75_E_PIN 18
+#endif
+#ifndef HUB75_DRIVER
+#define HUB75_DRIVER HUB75_I2S_CFG::ICN2038S
+#endif
+#ifndef HUB75_CLK_PHASE
+#define HUB75_CLK_PHASE false
+#endif
+
 // Display
 MatrixPanel_I2S_DMA *dma_display = nullptr;
 
@@ -391,20 +441,20 @@ static void initPanel() {
   HUB75_I2S_CFG cfg(PANEL_RES_X, PANEL_RES_Y, PANEL_CHAIN);
   cfg.i2sspeed        = HUB75_I2S_CFG::HZ_20M;   // or HZ_40M if stable
   cfg.min_refresh_rate= 240;                     // bump target refresh
-  cfg.clkphase        = false;                    // try both ways
-  cfg.driver   = HUB75_I2S_CFG::ICN2038S;
+  cfg.clkphase        = HUB75_CLK_PHASE;         // toggle via build flag if rows are shifted
+  cfg.driver          = HUB75_DRIVER;
 
   // Color/ctrl pins
-  cfg.gpio.r1 = 25;  cfg.gpio.g1 = 26;  cfg.gpio.b1 = 27;
-  cfg.gpio.r2 = 14;  cfg.gpio.g2 = 12;  cfg.gpio.b2 = 13;
-  cfg.gpio.clk= 16;  cfg.gpio.lat= 4;   cfg.gpio.oe  = 15;
+  cfg.gpio.r1 = HUB75_R1_PIN;  cfg.gpio.g1 = HUB75_G1_PIN;  cfg.gpio.b1 = HUB75_B1_PIN;
+  cfg.gpio.r2 = HUB75_R2_PIN;  cfg.gpio.g2 = HUB75_G2_PIN;  cfg.gpio.b2 = HUB75_B2_PIN;
+  cfg.gpio.clk= HUB75_CLK_PIN; cfg.gpio.lat= HUB75_LAT_PIN; cfg.gpio.oe  = HUB75_OE_PIN;
 
-  // Address lines (these values match one of your earlier working variants)
-  cfg.gpio.a = 23;   // fixed
-  cfg.gpio.b = 19;
-  cfg.gpio.c = 5;    // fixed
-  cfg.gpio.d = 18;
-  cfg.gpio.e = 17;
+  // Address lines (override via build flags when swapping panel driver boards)
+  cfg.gpio.a = HUB75_A_PIN;
+  cfg.gpio.b = HUB75_B_PIN;
+  cfg.gpio.c = HUB75_C_PIN;
+  cfg.gpio.d = HUB75_D_PIN;
+  cfg.gpio.e = HUB75_E_PIN;
 
   dma_display = new MatrixPanel_I2S_DMA(cfg);
   dma_display->begin();
